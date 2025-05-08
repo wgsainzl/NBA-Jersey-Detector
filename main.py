@@ -1,9 +1,22 @@
 import cv2
 import numpy as np
 import easyocr
+import Levenshtein
 
 # Initialize EasyOCR
 reader = easyocr.Reader(['en'], gpu=False)
+
+# Use Levenshtein to catch simmilarities if text detector fail
+def best_text_match(detected_texts, team_names):
+    best_team = None
+    best_score = float('inf')
+    for text in detected_texts:
+        for team in team_names:
+            dist = Levenshtein.distance(text, team)
+            if dist < best_score and dist <= 3: 
+                best_score = dist
+                best_team = team
+    return best_team
 
 # NBA teams dictionary with LAB color values (more perceptual)
 nba_teams = {
@@ -13,13 +26,25 @@ nba_teams = {
 
 # --- Preprocessing for OCR ---
 def preprocess_for_ocr(roi):
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    contrasted = cv2.convertScaleAbs(gray, alpha=2.5, beta=0)
-    thresh = cv2.adaptiveThreshold(contrasted, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
-                                   cv2.THRESH_BINARY_INV, 15, 10)
-    kernel = np.ones((2, 2), np.uint8)
-    dilated = cv2.dilate(thresh, kernel, iterations=1)
-    return dilated
+    # Use the red channel — gold letters stand out more
+    red_channel = roi[:, :, 2]
+
+    # Apply CLAHE for local contrast enhancement
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(red_channel)
+
+    # Invert the image BEFORE thresholding: dark background becomes light
+    inverted = cv2.bitwise_not(enhanced)
+
+    # Adaptive threshold (text now is darker than background after inversion)
+    thresh = cv2.adaptiveThreshold(
+        inverted, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        15, 10
+    )
+
+    return thresh
 
 # --- Get Dominant Color in BGR and convert to LAB ---
 def get_dominant_color(image):
@@ -67,12 +92,7 @@ while True:
     color_match = match_color(dominant_lab, nba_teams)
 
     # --- Text match ---
-    text_match = None
-    for text in detected_texts:
-        for team in nba_teams:
-            if team in text or text in team:
-                text_match = team
-                break
+    text_match = best_text_match(detected_texts, nba_teams.keys())
 
     # --- Final decision ---
     final_team = None
